@@ -1,0 +1,50 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 3373,
+    "host_key": "./host_rsa.key",
+    "max_connections_total": 50,
+    "max_connections_per_user": 5,
+    "idle_session_timeout": 900,
+    "allow_symlinks": false,
+    "audit_log": "./logs/audit.jsonl"
+  },
+  "users": [
+    {
+      "username": "password_only",
+      "password": "change-me",
+      "permissions": "read_write",
+      "root": "./data/password_only",
+      "description": "Human user or legacy integration that authenticates with password only."
+    },
+    {
+      "username": "key_only",
+      "authorized_keys": ["./keys/key_only.pub"],
+      "permissions": "read_write",
+      "root": "./data/key_only",
+      "description": "Automation or service account that uses SSH key authentication only."
+    },
+    {
+      "username": "hybrid",
+      "password": "change-me-too",
+      "authorized_keys": ["./keys/hybrid.pub"],
+      "permissions": "read_write",
+      "root": "./data/hybrid",
+      "description": "Account that supports both password and SSH key login."
+    },
+    {
+      "username": "readonly",
+      "password": "download-only",
+      "permissions": "read_only",
+      "root": "./data/readonly",
+      "description": "Partner, audit, or reporting account that may list and download but not upload or delete."
+    },
+    {
+      "username": "writer",
+      "password": "upload-delete",
+      "permissions": "read_write",
+      "root": "./data/writer",
+      "description": "Operational account with full read and write access."
+    }
+  ]
+}

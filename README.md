@@ -2,9 +2,16 @@
 
 Python-based SFTP server with:
 
+- Multiple user accounts from one config file
 - Username/password authentication
 - Public key authentication
-- `both` mode to allow password and key auth at the same time
+- Accounts that support both password and key auth
+- Per-user read-only or read-write access
+- Per-user root directories
+- Configurable audit logging for uploads, downloads, and deletes
+- Configurable total/per-user connection limits
+- Configurable idle session timeout
+- Optional symlink disable for stricter security
 - Standard SFTP file operations like upload, download, list, stat, rename, delete, mkdir, rmdir, chmod, chown, symlink, and readlink
 - Resume-friendly transfers via SFTP offset-based reads/writes, plus a test client with `resume-upload` and `resume-download`
 
@@ -18,58 +25,53 @@ pip install -r requirements.txt
 
 ## Run
 
-Serve `/tmp/sftp-root` for user `demo`:
+Copy the sample config and adjust it for your environment:
 
 ```bash
-python3 sftp_server.py \
-  --root /tmp/sftp-root \
-  --username demo \
-  --password secret123
+cp server_config.example.json server_config.json
 ```
 
-By default, the server uses `--auth-mode both`, which means:
-
-- password auth is accepted when `--password` is provided
-- public key auth is accepted when `--authorized-key` is provided one or more times
-
-Example with both auth types enabled:
+Then start the server:
 
 ```bash
-python3 sftp_server.py \
-  --root /tmp/sftp-root \
-  --username demo \
-  --password secret123 \
-  --authorized-key ~/.ssh/id_ed25519.pub \
-  --authorized-key ~/.ssh/id_rsa.pub
+python3 sftp_server.py --config ./server_config.json
 ```
 
-Force password-only auth:
+The config file is JSON and supports multiple users. Each user can have:
 
-```bash
-python3 sftp_server.py \
-  --root /tmp/sftp-root \
-  --username demo \
-  --password secret123 \
-  --auth-mode password
-```
+- password-only login
+- key-only login
+- both password and key login
+- read-only access
+- read-write access
+- a separate root directory
 
-Force key-only auth:
+The `server` section can also define operational controls:
 
-```bash
-python3 sftp_server.py \
-  --root /tmp/sftp-root \
-  --username demo \
-  --authorized-key ~/.ssh/id_ed25519.pub \
-  --auth-mode key
-```
+- `max_connections_total`: maximum simultaneous client connections for the whole server
+- `max_connections_per_user`: maximum simultaneous sessions for one username
+- `idle_session_timeout`: disconnect inactive sessions after this many seconds
+- `allow_symlinks`: allow or block symlink creation and readlink operations
+- `audit_log`: JSON-lines audit log file for transfers and deletes
+
+Example config: [server_config.example.json](/Users/rameshboini/github/sftpserver/server_config.example.json)
+
+Supported user examples in the sample config:
+
+- `password_only`: password auth only, read-write
+- `key_only`: key auth only, read-write
+- `hybrid`: password and key auth, read-write
+- `readonly`: password auth, read-only
+- `writer`: password auth, read-write
 
 ## Notes
 
-- A host key file is required for SSH. If `--host-key` does not exist, the server creates one automatically.
-- The SFTP root directory is created automatically if it does not exist.
-- Paths are constrained to the configured root directory.
-- This server currently supports a single configured user per process, which is a good starting point for local use and testing.
+- A host key file is required for SSH. If the configured `host_key` file does not exist, the server creates one automatically.
+- Each user root directory is created automatically if it does not exist.
+- Paths are constrained to each user's configured root directory.
 - SFTP resume support is compatible with standard client behavior because the protocol supports reading and writing from explicit offsets.
+- Relative paths in the config file are resolved relative to the config file location.
+- Audit log events are written in JSON-lines format, one event per line.
 
 ## SFTP Standard Operations Explained
 
@@ -215,8 +217,16 @@ This server supports both at the same time, or either one by itself.
 
 This server supports the main everyday SFTP operations people expect:
 
-- login with password
-- login with SSH public key
+- multiple users in one server process
+- password-only accounts
+- key-only accounts
+- accounts that allow both password and SSH public key login
+- per-user read-only and read-write permissions
+- per-user root directories
+- audit logging of uploads, downloads, and deletes
+- configurable connection limits
+- configurable idle session timeout
+- optional symlink disable for stricter deployments
 - listing folders
 - viewing file information
 - upload
@@ -231,9 +241,11 @@ This server supports the main everyday SFTP operations people expect:
 
 ### What This Server Does Not Yet Add Beyond Core SFTP
 
-- multi-user configuration in one server process
 - vendor-specific extensions like filesystem usage extensions
 - full recursive copy as a built-in server feature, because clients normally handle that themselves
+- account expiration
+- IP allowlists
+- storage quotas
 
 ## Test Client
 
@@ -245,8 +257,8 @@ Examples:
 python3 tests/sftp_test_client.py \
   --host 127.0.0.1 \
   --port 3373 \
-  --username demo \
-  --password secret123 \
+  --username readonly \
+  --password download-only \
   list /
 ```
 
@@ -254,9 +266,20 @@ python3 tests/sftp_test_client.py \
 python3 tests/sftp_test_client.py \
   --host 127.0.0.1 \
   --port 3373 \
-  --username demo \
-  --password secret123 \
+  --username writer \
+  --password upload-delete \
   resume-upload ./big-file.bin /big-file.bin
+```
+
+Key-based example:
+
+```bash
+python3 tests/sftp_test_client.py \
+  --host 127.0.0.1 \
+  --port 3373 \
+  --username key_only \
+  --private-key ~/.ssh/id_rsa \
+  list /
 ```
 
 ## Tests
@@ -269,13 +292,21 @@ python3 -m unittest discover -s tests -v
 
 The integration tests in [tests/test_sftp_server.py](/Users/rameshboini/github/sftpserver/tests/test_sftp_server.py) cover:
 
-- password auth
-- public key auth
+- config loading
+- password-only accounts
+- key-only accounts
+- both-auth accounts
 - failed authentication
+- per-user root isolation
+- read-only permissions
+- read-write permissions
+- audit log generation
+- symlink policy enforcement
+- idle session timeout
+- connection limits
 - upload/download/list/stat/remove
 - mkdir/rmdir/rename/posix rename
 - symlink/readlink
 - chmod/chown/truncate
-- jailed path enforcement
 - interrupted upload/download resume flows
 - random-access writes on existing files
