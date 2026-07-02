@@ -7,6 +7,40 @@ Python-based SFTP server with:
 - `both` mode to allow password and key auth at the same time
 - Standard SFTP file operations like upload, download, list, stat, rename, delete, mkdir, rmdir, chmod, chown, symlink, and readlink
 - Resume-friendly transfers via SFTP offset-based reads/writes, plus a test client with `resume-upload` and `resume-download`
+- **Robot Framework integration** for system testing with operation verification
+
+## Overview
+
+This is a standalone SFTP server built on the Paramiko SSH library. It provides a complete implementation of the SFTP protocol with:
+
+- **Single-user design** - One configured user per server process (ideal for local testing)
+- **Path jail** - All paths are constrained to the configured root directory
+- **Operation tracking** - All SFTP operations are recorded for verification (useful for testing)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        SFTP Server Architecture                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────┐     ┌──────────────────┐     ┌─────────────┐ │
+│  │   Client     │────▶│  SSH Transport   │────▶│ SFTP Server │ │
+│  │  (paramiko)  │     │  (paramiko)      │     │   (this)    │ │
+│  └──────────────┘     └──────────────────┘     └──────┬──────┘ │
+│                                                       │         │
+│                                                       ▼         │
+│                                                ┌─────────────┐  │
+│                                                │    Jail     │  │
+│                                                │ (path map)  │  │
+│                                                └──────┬──────┘  │
+│                                                       │         │
+│                                                       ▼         │
+│                                                ┌─────────────┐  │
+│                                                │  Filesystem │  │
+│                                                │  (/root)    │  │
+│                                                └─────────────┘  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Install
 
@@ -67,9 +101,39 @@ python3 sftp_server.py \
 
 - A host key file is required for SSH. If `--host-key` does not exist, the server creates one automatically.
 - The SFTP root directory is created automatically if it does not exist.
-- Paths are constrained to the configured root directory.
+- Paths are constrained to the configured root directory (jail/chroot behavior).
 - This server currently supports a single configured user per process, which is a good starting point for local use and testing.
 - SFTP resume support is compatible with standard client behavior because the protocol supports reading and writing from explicit offsets.
+
+## Architecture
+
+### Core Components
+
+| Component | Description |
+|-----------|-------------|
+| `ThreadedSFTPServer` | Main server class that handles client connections |
+| `SFTPSSHServer` | SSH authentication handler (password/key auth) |
+| `LocalSFTPServer` | SFTP protocol implementation |
+| `Jail` | Path mapping - constrains all paths to root directory |
+| `OperationTracker` | Records all SFTP operations for verification |
+
+### Operation Tracking Flow
+
+```
+Client Operation (upload)
+        │
+        ▼
+   SFTP Server
+        │
+        ├─▶ LocalSFTPServer.open()
+        │        │
+        │        └─▶ OperationTracker.record("open", path, True)
+        │
+        ▼
+   Verification (Robot Framework)
+        │
+        └─▶ Get Last Operation → {"operation": "open", "path": "/file.txt", "success": true}
+```
 
 ## SFTP Standard Operations Explained
 
@@ -235,6 +299,122 @@ This server supports the main everyday SFTP operations people expect:
 - vendor-specific extensions like filesystem usage extensions
 - full recursive copy as a built-in server feature, because clients normally handle that themselves
 
+## Robot Framework Integration
+
+This server can be used with Robot Framework for system testing. The `SftpServerLibrary` provides keywords for server lifecycle management and operation verification.
+
+### Install Robot Framework
+
+```bash
+pip install -r requirements.txt
+```
+
+### Robot Framework Library Keywords
+
+**Server Lifecycle:**
+- `Start SFTP Server` - Start the server with configuration
+- `Stop SFTP Server` - Stop the running server
+- `Connect To Server` - Connect as a client
+- `Disconnect From Server` - Disconnect client session
+
+**Client Operations:**
+- `Upload File` - Upload a file
+- `Download File` - Download a file
+- `List Directory` - List directory contents
+- `Delete File` - Remove a file
+- `Create Directory` - Make a directory
+- `Remove Directory` - Remove empty directory
+- `Rename File` - Move/rename a file
+- `Get File Stats` - Get file size and permissions
+- `Set File Permissions` - chmod
+- `Create Symlink` - Create symbolic link
+- `Read Symlink` - Get symlink target
+- `Resume Upload` - Resume interrupted upload
+- `Resume Download` - Resume interrupted download
+
+**Operation Verification:**
+- `Get Last Operation` - Get the most recent operation details
+- `Get Operations Count` - Count total operations
+- `Get Operations By Type` - Filter operations by type
+- `Operation Should Exist` - Assert an operation occurred
+- `Operation Should Succeed` - Assert an operation succeeded
+- `Clear Operations` - Reset operation history
+
+### Operation Tracking Example
+
+When a client performs an operation, the server records it. You can verify operations in your tests:
+
+```robotframework
+*** Settings ***
+Library    SftpServerLibrary
+
+*** Test Cases ***
+Upload And Verify Operation
+    Start SFTP Server    /tmp/sftp-test    demo    secret123
+    Connect To Server    demo    secret123
+    
+    # Upload a file
+    Upload File    /tmp/test.txt    /upload.txt
+    
+    # Verify the operation was recorded and succeeded
+    Operation Should Exist    open    /upload.txt
+    Operation Should Succeed    open    /upload.txt
+    
+    # Get operation details
+    ${op} =    Get Last Operation
+    Should Be Equal    ${op['operation']}    open
+    Should Be Equal    ${op['path']}    /upload.txt
+    Should Be True    ${op['success']}
+    
+    [Teardown]    Stop SFTP Server
+```
+
+### Complete Robot Framework Test Suite Example
+
+```robotframework
+*** Settings ***
+Library    SftpServerLibrary
+Suite Setup    Start Server
+Suite Teardown    Stop SFTP Server
+
+*** Variables ***
+${ROOT}    /tmp/sftp-test-root
+${USER}    demo
+${PASS}    secret123
+
+*** Keywords ***
+Start Server
+    Start SFTP Server    ${ROOT}    ${USER}    ${PASS}
+    Connect To Server    ${USER}    ${PASS}
+
+*** Test Cases ***
+Upload File And Verify
+    Upload File    /tmp/local.txt    /remote.txt
+    Operation Should Succeed    open    /remote.txt
+    Clear Operations
+
+Download File And Verify
+    List Directory
+    Operation Should Succeed    list    .
+    Clear Operations
+
+Delete File And Verify
+    Delete File    /remote.txt
+    Operation Should Succeed    remove    /remote.txt
+
+Directory Operations
+    Create Directory    /testdir
+    Operation Should Succeed    mkdir    /testdir
+    Remove Directory    /testdir
+    Operation Should Succeed    rmdir    /testdir
+```
+
+### Running Robot Framework Tests
+
+```bash
+robot tests/robot_tests/sftp_server_tests.robot
+```
+
 ## Test Client
 
 A small Python client is included at [tests/sftp_test_client.py](/Users/rameshboini/github/sftpserver/tests/sftp_test_client.py).
@@ -279,3 +459,67 @@ The integration tests in [tests/test_sftp_server.py](/Users/rameshboini/github/s
 - jailed path enforcement
 - interrupted upload/download resume flows
 - random-access writes on existing files
+
+## Package Structure
+
+```
+sftpserver/
+├── sftp_server.py          # Core server implementation
+├── robot_sftp_library.py   # Robot Framework library
+├── __init__.py             # Package exports
+tests/
+├── test_sftp_server.py     # Unit tests
+├── sftp_test_client.py     # Test client CLI
+└── robot_tests/            # Robot Framework tests
+    └── sftp_server_tests.robot
+sftp_server.py              # CLI entry point wrapper
+requirements.txt            # Dependencies
+README.md                   # This file
+```
+
+## API Usage
+
+You can also use the server programmatically:
+
+```python
+from sftpserver.sftp_server import (
+    ThreadedSFTPServer,
+    Jail,
+    AuthConfig,
+    OperationTracker,
+)
+import paramiko
+import tempfile
+from pathlib import Path
+
+# Create tracker for operation verification
+tracker = OperationTracker()
+
+# Setup server
+root = Path(tempfile.mkdtemp())
+auth = AuthConfig("demo", "secret123", "password", [])
+jail = Jail(root)
+host_key = paramiko.RSAKey.generate(2048)
+
+server = ThreadedSFTPServer(
+    "127.0.0.1", 0, host_key, auth, jail, tracker=tracker
+)
+server.start()
+
+# Connect as client
+transport = paramiko.Transport(("127.0.0.1", server.address[1]))
+transport.connect(username="demo", password="secret123")
+sftp = paramiko.SFTPClient.from_transport(transport)
+
+# Perform operations
+sftp.put("/local/file.txt", "/remote/file.txt")
+
+# Verify operations
+print(f"Operations: {tracker.get_operations_count()}")
+print(f"Last op: {tracker.get_last_operation()}")
+
+# Cleanup
+sftp.close()
+transport.close()
+server.shutdown()
+```

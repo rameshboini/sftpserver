@@ -10,7 +10,7 @@ from pathlib import Path
 
 import paramiko
 
-from sftp_server import AuthConfig, Jail, ThreadedSFTPServer
+from sftpserver.sftp_server import AuthConfig, Jail, OperationTracker, ThreadedSFTPServer
 
 
 def write_public_key(path: Path, key: paramiko.PKey) -> None:
@@ -39,12 +39,14 @@ class SFTPServerIntegrationTests(unittest.TestCase):
             auth_mode="both",
             authorized_keys=[cls.user_key],
         )
+        cls.tracker = None  # No tracking for unit tests
         cls.server = ThreadedSFTPServer(
             "127.0.0.1",
             0,
             cls.host_key,
             auth,
             Jail(cls.root),
+            tracker=cls.tracker,
         )
         cls.server.start()
         cls.host, cls.port = cls.server.address
@@ -240,6 +242,153 @@ class SFTPServerIntegrationTests(unittest.TestCase):
                 self.assertEqual(remote_file.read(), b"abXYZf")
         finally:
             self.close_client(transport, sftp)
+
+
+class OperationTrackerTests(unittest.TestCase):
+    """Tests for the OperationTracker class."""
+
+    def test_record_operation(self) -> None:
+        tracker = OperationTracker()
+        tracker.record("open", "/test.txt", True)
+        
+        ops = tracker.get_operations()
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0]["operation"], "open")
+        self.assertEqual(ops[0]["path"], "/test.txt")
+        self.assertTrue(ops[0]["success"])
+
+    def test_record_multiple_operations(self) -> None:
+        tracker = OperationTracker()
+        tracker.record("open", "/file1.txt", True)
+        tracker.record("list", "/", True)
+        tracker.record("remove", "/file1.txt", True)
+        
+        self.assertEqual(tracker.get_operations_count(), 3)
+
+    def test_get_operations_by_type(self) -> None:
+        tracker = OperationTracker()
+        tracker.record("open", "/file1.txt", True)
+        tracker.record("list", "/", True)
+        tracker.record("open", "/file2.txt", True)
+        
+        open_ops = tracker.get_operations_by_type("open")
+        self.assertEqual(len(open_ops), 2)
+
+    def test_get_last_operation(self) -> None:
+        tracker = OperationTracker()
+        tracker.record("open", "/first.txt", True)
+        tracker.record("open", "/last.txt", True)
+        
+        last = tracker.get_last_operation()
+        self.assertEqual(last["path"], "/last.txt")
+
+    def test_get_last_operation_empty(self) -> None:
+        tracker = OperationTracker()
+        self.assertIsNone(tracker.get_last_operation())
+
+    def test_record_failed_operation(self) -> None:
+        tracker = OperationTracker()
+        tracker.record("open", "/missing.txt", False, "File not found")
+        
+        op = tracker.get_last_operation()
+        self.assertFalse(op["success"])
+        self.assertEqual(op["error"], "File not found")
+
+    def test_clear_operations(self) -> None:
+        tracker = OperationTracker()
+        tracker.record("open", "/test.txt", True)
+        tracker.clear()
+        
+        self.assertEqual(tracker.get_operations_count(), 0)
+
+
+class OperationTrackingIntegrationTests(unittest.TestCase):
+    """Integration tests for operation tracking with SFTP server."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.tmpdir = Path(cls._tmp.name)
+        cls.root = cls.tmpdir / "root"
+        cls.root.mkdir()
+
+        cls.host_key = paramiko.RSAKey.generate(2048)
+        cls.user_key = paramiko.RSAKey.generate(2048)
+
+        write_public_key(cls.tmpdir / "id_rsa.pub", cls.user_key)
+
+        cls.tracker = OperationTracker()
+        auth = AuthConfig(
+            username="demo",
+            password="secret123",
+            auth_mode="both",
+            authorized_keys=[cls.user_key],
+        )
+        cls.server = ThreadedSFTPServer(
+            "127.0.0.1",
+            0,
+            cls.host_key,
+            auth,
+            Jail(cls.root),
+            tracker=cls.tracker,
+        )
+        cls.server.start()
+        cls.host, cls.port = cls.server.address
+        time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls._tmp.cleanup()
+
+    def connect(self) -> tuple[paramiko.Transport, paramiko.SFTPClient]:
+        transport = paramiko.Transport((self.host, self.port))
+        transport.connect(username="demo", password="secret123")
+        return transport, paramiko.SFTPClient.from_transport(transport)
+
+    def close(self, transport: paramiko.Transport, sftp: paramiko.SFTPClient) -> None:
+        sftp.close()
+        transport.close()
+
+    def test_upload_tracks_operation(self) -> None:
+        local_file = self.tmpdir / "upload.txt"
+        local_file.write_text("test content")
+        
+        transport, sftp = self.connect()
+        try:
+            sftp.put(str(local_file), "/uploaded.txt")
+            
+            ops = self.tracker.get_operations_by_type("open")
+            self.assertTrue(len(ops) > 0)
+            self.assertTrue(any(op["success"] for op in ops))
+        finally:
+            self.close(transport, sftp)
+
+    def test_list_tracks_operation(self) -> None:
+        transport, sftp = self.connect()
+        try:
+            sftp.listdir("/")
+            
+            ops = self.tracker.get_operations_by_type("list")
+            self.assertTrue(len(ops) > 0)
+        finally:
+            self.close(transport, sftp)
+
+    def test_delete_tracks_operation(self) -> None:
+        local_file = self.tmpdir / "to_delete.txt"
+        local_file.write_text("delete me")
+        
+        transport, sftp = self.connect()
+        try:
+            sftp.put(str(local_file), "/delete_me.txt")
+            self.tracker.clear()
+            
+            sftp.remove("/delete_me.txt")
+            
+            ops = self.tracker.get_operations_by_type("remove")
+            self.assertTrue(len(ops) > 0)
+        finally:
+            self.close(transport, sftp)
 
 
 if __name__ == "__main__":
